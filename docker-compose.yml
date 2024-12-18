@@ -1,0 +1,148 @@
+services:
+  nginx:
+    hostname: nginx
+    image: nginx
+    container_name: nginx
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./ssl:/etc/nginx/ssl
+    depends_on:
+      - frontend
+      - backend
+      - phpmyadmin
+    networks:
+      - frontend
+      - backend
+      - phpmyadmin
+      - mail_network
+    ports:
+      - "80:80"
+      - "443:443" # SSL用ポート追加（必要に応じて）
+
+  frontend:
+    hostname: frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: frontend
+    volumes:
+      - ./frontend/source:/workspace
+      - node_modules:/workspace/node_modules
+    command: npm start
+    tty: true
+    networks:
+      - frontend
+      - backend
+    ports:
+      - "3000:3000"
+
+  backend:
+    hostname: backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: backend
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      - MYSQL_USER=${MYSQL_USER}
+      - MYSQL_PASSWORD=${MYSQL_PASSWORD}
+      - MYSQL_NAME=${MYSQL_NAME}
+      - MYSQL_HOST=${MYSQL_HOST}
+      - MYSQL_PORT=${MYSQL_PORT}
+    volumes:
+      - ./backend/source:/workspace
+    command: [ "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000" ]
+    tty: true
+    networks:
+      - backend
+      - mysql
+    ports:
+      - "8000:8000"
+
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:latest
+    container_name: mailserver
+    # Provide the FQDN of your mail server here (Your DNS MX record should point to this value)
+    hostname: ${MAIL_HOST}
+    env_file: mailserver.env
+    # More information about the mail-server ports:
+    # https://docker-mailserver.github.io/docker-mailserver/latest/config/security/understanding-the-ports/
+    ports:
+      - "25:25"    # SMTP  (explicit TLS => STARTTLS, Authentication is DISABLED => use port 465/587 instead)
+      - "143:143"  # IMAP4 (explicit TLS => STARTTLS)
+      - "465:465"  # ESMTP (implicit TLS)
+      - "587:587"  # ESMTP (explicit TLS => STARTTLS)
+      - "993:993"  # IMAP4 (implicit TLS)
+    volumes:
+      - ./docker-data/dms/mail-data/:/var/mail/
+      - ./docker-data/dms/mail-state/:/var/mail-state/
+      - ./docker-data/dms/mail-logs/:/var/log/mail/
+      - ./docker-data/dms/config/:/tmp/docker-mailserver/
+      - /etc/localtime:/etc/localtime:ro
+    restart: always
+    stop_grace_period: 1m
+    # Uncomment if using `ENABLE_FAIL2BAN=1`:
+    # cap_add:
+    #   - NET_ADMIN
+    healthcheck:
+      test: "ss --listening --tcp | grep -P 'LISTEN.+:smtp' || exit 1"
+      timeout: 3s
+      retries: 0
+
+  mailpit:
+    image: "axllent/mailpit:latest"
+    container_name: mailpit
+    ports:
+      - "${FORWARD_MAILPIT_PORT:-1025}:1025"
+      - "${FORWARD_MAILPIT_DASHBOARD_PORT:-8025}:8025"
+    networks:
+      - mail_network
+
+  mysql:
+    image: mysql:8.4
+    container_name: mysql
+    volumes:
+      - mysql_db:/var/lib/mysql
+      - ./initdb.d:/docker-entrypoint-initdb.d
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_PASSWORD}
+    expose:
+      - '3306'
+    networks:
+      - mysql
+    healthcheck:
+      test: [ "CMD-SHELL", "mysqladmin ping -u${MYSQL_USER} -p${MYSQL_PASSWORD}" ]
+      interval: 30s
+      retries: 5
+      start_period: 30s
+      timeout: 10s
+
+  phpmyadmin:
+    image: phpmyadmin
+    depends_on:
+      - mysql
+    container_name: phpmyadmin
+    environment:
+      PMA_HOST: mysql
+      PMA_ABSOLUTE_URI: "http://localhost/phpmyadmin/"
+    expose:
+      - '80'
+    networks:
+      - phpmyadmin
+      - mysql
+
+volumes:
+  mysql_db:
+  node_modules:
+  maildata:
+  mailconfig:
+
+networks:
+  frontend:
+  backend:
+  mysql:
+  phpmyadmin:
+  mail_network:
+    driver: bridge
